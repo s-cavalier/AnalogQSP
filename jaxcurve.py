@@ -5,24 +5,32 @@ import optax
 from abc import abstractmethod
 from typing import Callable
 
+
+"""
+JAX-based workflow is slightly different.
+Implement a curve that inherits from LearnableCurve (so, implement position, velocity, and acceleration).
+You can use lax.stop_gradient and other jax-based methods to prevent against optimization for static variables.
+Otherwise optax will optimize it. LearnableCurve inherits from eqx.Module, so it is a dataclass and satisfies
+a pytree. 
+"""
 class LearnableCurve(eq.Module):
     t0: float
     tf: float
 
     @abstractmethod
-    def position(self, t: jax.Array) -> jax.Array:
+    def position(self, t: jnp.ndarray) -> jnp.ndarray:
         pass
 
     @abstractmethod
-    def velocity(self, t: jax.Array) -> jax.Array:
+    def velocity(self, t: jnp.ndarray) -> jnp.ndarray:
         pass
 
     @abstractmethod
-    def acceleration(self, t: jax.Array) -> jax.Array:
+    def acceleration(self, t: jnp.ndarray) -> jnp.ndarray:
         pass
 
     @eq.filter_jit
-    def curvature(self, t: jax.Array, eps: float = 1e-8) -> jax.Array:
+    def curvature(self, t: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
         v = self.velocity(t)
         a = self.acceleration(t)
 
@@ -40,11 +48,11 @@ class LearnableCurve(eq.Module):
     def soft_max_curvature(self, key, samples = 4096, strength = 32):
         k = jax.vmap(self.curvature)( jax.random.uniform(key, shape=(samples,), minval=self.t0, maxval=self.tf) )
         return jax.scipy.special.logsumexp(k * strength, axis=0) / strength
-
+    
     def optimize(
         self,
-        cost_fn: Callable[["LearnableCurve", jax.Array], jax.Array],
-        key: jax.Array,
+        cost_fn: Callable[["LearnableCurve", jnp.ndarray], jnp.ndarray],
+        key: jnp.ndarray,
         lr: float = 1e-3,
         steps: int = 1000,
         chunk_size: int = 100,
@@ -186,3 +194,21 @@ class ArclenParameterize(LearnableCurve):
         a_perp = a - proj
 
         return (L ** 2) * a_perp / ((speed + 1e-8) ** 2)
+
+    @eq.filter_jit
+    def magnus_2(self, key, samples=4096):
+        u = jax.random.uniform(key, (samples, 2))
+        u_1, u_2 = u[:, 0], u[:, 1]
+
+        t1 = u_1
+        t2 = u_1 * u_2
+
+        vel_func = jax.vmap(self.velocity)
+
+        r_t1 = vel_func(t1)
+        r_t2 = vel_func(t2)
+
+        vals = jnp.cross(r_t1, r_t2) * u_1[:, None]
+        return jnp.mean(vals, axis=0)
+        
+    
