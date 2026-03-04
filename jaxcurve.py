@@ -2,6 +2,7 @@ import equinox as eq
 import jax
 import jax.numpy as jnp
 import optax
+import matplotlib.pyplot as plt
 from abc import abstractmethod
 from typing import Callable
 
@@ -48,6 +49,15 @@ class LearnableCurve(eq.Module):
     def soft_max_curvature(self, key, samples = 4096, strength = 32):
         k = jax.vmap(self.curvature)( jax.random.uniform(key, shape=(samples,), minval=self.t0, maxval=self.tf) )
         return jax.scipy.special.logsumexp(k * strength, axis=0) / strength
+
+    def plot_curvature(self, samples = 4096):
+        t = jnp.linspace(self.t0, self.tf, samples)
+        k = jax.vmap(self.curvature)(t)
+        plt.plot(t, k)
+        plt.xlabel("t")
+        plt.ylabel(r"$\kappa$")
+        plt.title(r"Curvature over interval $[0, 1]$")
+        plt.show()
     
     def optimize(
         self,
@@ -195,6 +205,8 @@ class ArclenParameterize(LearnableCurve):
 
         return (L ** 2) * a_perp / ((speed + 1e-8) ** 2)
 
+    #TODO: Implement basic curvature? probably faster
+
     @eq.filter_jit
     def magnus_2(self, key, samples=4096):
         u = jax.random.uniform(key, (samples, 2))
@@ -211,4 +223,48 @@ class ArclenParameterize(LearnableCurve):
         vals = jnp.cross(r_t1, r_t2) * u_1[:, None]
         return jnp.mean(vals, axis=0)
         
-    
+    @eq.filter_jit
+    def magnus_3(self, key, samples=4096):
+        u = jax.random.uniform(key, (samples, 3))
+        u_1, u_2, u_3 = u[:, 0], u[:, 1], u[:, 2]
+
+        t1 = u_1
+        t2 = u_1 * u_2
+        t3 = u_1 * u_2 * u_3
+
+        vel_func = jax.vmap(self.velocity)
+
+        r_t1 = vel_func(t1)
+        r_t2 = vel_func(t2)
+        r_t3 = vel_func(t3)
+
+        vals = (jnp.cross( r_t1, jnp.cross(r_t2, r_t3) ) + jnp.cross( r_t3, jnp.cross(r_t2, r_t1) )) * (u_1[:, None]**2) * u_2[:, None]
+
+        return 2/3 * jnp.mean(vals, axis=0)
+
+    @eq.filter_jit
+    def magnus_4(self, key, samples=4096):
+        u = jax.random.uniform(key, (samples, 4))
+        u_1, u_2, u_3, u_4 = u[:, 0], u[:, 1], u[:, 2], u[:, 3]
+
+        t1 = u_1
+        t2 = u_1 * u_2
+        t3 = u_1 * u_2 * u_3
+        t4 = u_1 * u_2 * u_3 * u_4
+
+        vel_func = jax.vmap(self.velocity)
+
+        r_t1 = vel_func(t1)
+        r_t2 = vel_func(t2)
+        r_t3 = vel_func(t3)
+        r_t4 = vel_func(t4)
+
+        val1 = jnp.cross( jnp.cross( jnp.cross( r_t1, r_t2 ), r_t3 ), r_t4 )
+        val2 = jnp.cross( r_t1, jnp.cross( jnp.cross(r_t2, r_t3), r_t4 ) )
+        val3 = jnp.cross( r_t1, jnp.cross( r_t2, jnp.cross( r_t3, r_t4 ) ) )
+        val4 = jnp.cross( r_t2, jnp.cross( r_t3, jnp.cross( r_t4, r_t1 ) ) )
+
+        vals = (val1 + val2 + val3 + val4) * (u_1[:, None]**3) * (u_2[:, None]**2) * u_3[:, None]
+
+        return 2/3 * jnp.mean(vals, axis=0)
+
