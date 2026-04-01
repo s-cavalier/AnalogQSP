@@ -1,59 +1,102 @@
-from jaxcurve import LearnableCurve, ArclenParameterize
-import jax.numpy as jnp
-import jax
+import math
+import numpy as np
+
 import equinox as eq
+import jax
+import jax.numpy as jnp
 
-class FourierCurve(LearnableCurve):
-    Z: jnp.ndarray
-    p_mat: jnp.ndarray = eq.field(static=True)
-    null_M: jnp.ndarray = eq.field(static=True)
-    frequencies: jnp.ndarray = eq.field(static=True)
+from jaxcurve import LearnableCurve
 
-    def __init__(self, frequencies: jax.Array, *fixed_pts: tuple[jax.Array, float, int] ):
-        super().__init__(0, 1)
 
-        frequencies = jnp.asarray(frequencies)
-        self.frequencies = frequencies
+class BezierCurve(LearnableCurve):
+    num_control_points: int = eq.field(static=True)
+    endpoint: jax.Array
+    free_control_points: jax.Array
 
-        assert self.frequencies.shape[0] == len(fixed_pts)
+    # below are non trainable since they are integer arrays
+    binomial_coeffs: jax.Array
+    velocity_binomial_coeffs: jax.Array
+    acceleration_binomial_coeffs: jax.Array
 
-        M = jnp.stack([
-            jnp.concatenate([
-                (frequencies ** d) * jnp.sin( frequencies * t + jnp.pi * d / 2 ),
-                (frequencies ** d) * jnp.cos( frequencies * t + jnp.pi * d / 2)
-            ])
-            for _, t, d in fixed_pts
-        ])
+    def __init__(
+        self,
+        num_control_points: int,
+        endpoint: jax.Array,
+        key: jax.Array | None = None,
+        seed: int | None = None,
+    ):
+        if num_control_points <= 6: raise ValueError("num_control_points must be greater than 6")
+        if key is not None and seed is not None: raise ValueError("pass at most one of key or seed")
 
-        R = jnp.asarray([ r for r, _, _ in fixed_pts ])
+        endpoint = jnp.asarray(endpoint, dtype=jnp.float32)
+        if endpoint.shape != (3,): raise ValueError("endpoint must be a 3D point")
 
-        self.p_mat = jnp.linalg.lstsq(M, R, rcond=None)[0]
+        degree = num_control_points - 1
+        line = jnp.linspace(0.0, 1.0, num_control_points, dtype=endpoint.dtype)[:, None] * endpoint[None, :]
+        free_indices = [1, *range(3, num_control_points - 3), num_control_points - 2]
+        base_free_points = line[jnp.asarray(free_indices)]
 
-        Q, _ = jnp.linalg.qr(M.T, mode="complete")
-        self.null_M = Q[:, M.shape[0]:]
+        scale = max(float(jnp.linalg.norm(endpoint)), 1.0)
+        if key is None:
+            if seed is None:
+                seed = int(np.random.default_rng().integers(0, np.iinfo(np.uint32).max, dtype=np.uint32))
+            key = jax.random.key(int(seed))
 
-        self.Z = jnp.zeros((self.null_M.shape[1], 3))
+        noise = jax.random.normal(key, shape=base_free_points.shape, dtype=endpoint.dtype)
+        randomized_free_points = base_free_points + 0.25 * scale * noise
 
-    def get_X(self):
-        return self.p_mat + self.null_M @ self.Z
+        self.t0 = 0.0
+        self.tf = 1.0
+        self.num_control_points = int(num_control_points)
+        self.endpoint = endpoint
+        self.free_control_points = randomized_free_points
+        self.binomial_coeffs = jnp.asarray(
+            [math.comb(degree, i) for i in range(degree + 1)],
+            dtype=jnp.uint32,
+        )
+        self.velocity_binomial_coeffs = jnp.asarray(
+            [math.comb(degree - 1, i) for i in range(degree)],
+            dtype=jnp.uint32,
+        )
+        self.acceleration_binomial_coeffs = jnp.asarray(
+            [math.comb(degree - 2, i) for i in range(degree - 1)],
+            dtype=jnp.uint32,
+        )
 
-    def position(self, t: float):
-        N = self.frequencies.shape[0]
-        X = self.get_X()
+    def trainable_filter_spec(self):
+        mask = super().trainable_filter_spec()
+        return eq.tree_at(lambda m: m.endpoint, mask, replace=False)
 
-        time_freq = self.frequencies * t
-        return jnp.sum(X[:N] * jnp.sin(time_freq)[:, None] + X[N:2*N] * jnp.cos(time_freq)[:, None], axis=0)
+    def control_points(self):
+        p0 = jnp.zeros((1, 3), dtype=self.endpoint.dtype)
+        p1 = self.free_control_points[:1]
+        p2 = 2.0 * p1 - p0
+        middle = self.free_control_points[1:-1]
+        pn1 = self.free_control_points[-1:]
+        pn = self.endpoint[None, :]
+        pn2 = 2.0 * pn1 - pn
 
-    def velocity(self, t: float):
-        N = self.frequencies.shape[0]
-        X = self.get_X()
+        return jnp.concatenate([p0, p1, p2, middle, pn2, pn1, pn], axis=0)
 
-        time_freq = self.frequencies * t
-        return jnp.sum(self.frequencies[:, None] * ( X[:N] * jnp.cos(time_freq)[:, None] - X[N:2*N] * jnp.sin(time_freq)[:, None] ), axis=0)
-        
-    def acceleration(self, t: float):
-        N = self.frequencies.shape[0]
-        X = self.get_X()
+    def _bernstein_basis(self, t, coeffs):
+        t = jnp.asarray(t, dtype=self.endpoint.dtype)
+        degree = coeffs.shape[0] - 1
+        powers = jnp.arange(degree + 1)
+        return coeffs * (t[..., None] ** powers) * ((1.0 - t)[..., None] ** (degree - powers))
 
-        time_freq = self.frequencies * t
-        return jnp.sum((self.frequencies ** 2)[:, None] * ( -X[:N] * jnp.sin(time_freq)[:, None] - X[N:2*N] * jnp.cos(time_freq)[:, None] ), axis=0)
+    def position(self, t):
+        basis = self._bernstein_basis(t, self.binomial_coeffs)
+        return jnp.einsum("...i,ij->...j", basis, self.control_points())
+
+    def velocity(self, t):
+        degree = self.num_control_points - 1
+        control_diffs = self.control_points()[1:] - self.control_points()[:-1]
+        basis = self._bernstein_basis(t, self.velocity_binomial_coeffs)
+        return degree * jnp.einsum("...i,ij->...j", basis, control_diffs)
+
+    def acceleration(self, t):
+        degree = self.num_control_points - 1
+        control_points = self.control_points()
+        second_diffs = control_points[2:] - 2.0 * control_points[1:-1] + control_points[:-2]
+        basis = self._bernstein_basis(t, self.acceleration_binomial_coeffs)
+        return degree * (degree - 1) * jnp.einsum("...i,ij->...j", basis, second_diffs)
