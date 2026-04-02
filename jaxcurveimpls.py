@@ -53,19 +53,19 @@ class BezierCurve(LearnableCurve):
         self.free_control_points = randomized_free_points
         self.binomial_coeffs = jnp.asarray(
             [math.comb(degree, i) for i in range(degree + 1)],
-            dtype=jnp.uint64,
+            dtype=jnp.uint32,
         )
         self.velocity_binomial_coeffs = jnp.asarray(
             [math.comb(degree - 1, i) for i in range(degree)],
-            dtype=jnp.uint64,
+            dtype=jnp.uint32,
         )
         self.acceleration_binomial_coeffs = jnp.asarray(
             [math.comb(degree - 2, i) for i in range(degree - 1)],
-            dtype=jnp.uint64,
+            dtype=jnp.uint32,
         )
         self.jerk_binomial_coeffs = jnp.asarray(
             [math.comb(degree - 3, i) for i in range(degree - 2)],
-            dtype=jnp.uint64,
+            dtype=jnp.uint32,
         )
 
     def trainable_filter_spec(self):

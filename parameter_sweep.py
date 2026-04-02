@@ -34,7 +34,7 @@ if __name__ == "__main__":
             m3 = 8192 * jnp.linalg.norm(c.magnus(3, k, 10_000) - jnp.array([0, 0, 0])) # 0
             m4 = 4096 * jnp.linalg.norm(c.magnus(4, k, 10_000) - jnp.array([0, 0, 1/120])) # 1/120
             m5 = 8192 * jnp.linalg.norm(c.magnus(5, k, 10_000) - jnp.array([0, 0, 0])) # 0
-            m6 = 16384 * jnp.linalg.norm(c.magnus(6, k, 10_000) - jnp.array([0, 0, -1/5040])) # 1/120
+            m6 = 16384 * jnp.linalg.norm(c.magnus(6, k, 10_000) - jnp.array([0, 0, -1/5040])) # -1/5040
 
             return m2 + m3 + m4 + m5 + m6
 
@@ -64,10 +64,8 @@ if __name__ == "__main__":
         pow4 : jnp.ndarray = jnp.linalg.matrix_power(H_in, 4)
         pow6 : jnp.ndarray = jnp.linalg.matrix_power(H_in, 6)
 
-        expected = jax.scipy.linalg.expm(-1j * jnp.kron(
-            jnp.eye(2) - 1j * pow2/6 - 1j * pow4/120 - 1j * pow6/5040,
-            sig_z()
-        ))
+        target_polynomial = pow2 / 6 + pow4 / 120 - pow6 / 5040
+        expected = jax.scipy.linalg.expm(-1j * jnp.kron(target_polynomial, sig_z()))
 
         final_error : jnp.ndarray = jnp.linalg.norm( realized_unitary - expected )
 
@@ -85,5 +83,4 @@ if __name__ == "__main__":
     ax.set_zlabel(r'$\sigma_z$')
 
     fig.savefig('error_sweep.png')
-
 

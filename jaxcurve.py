@@ -9,7 +9,6 @@ from warnings import warn
 from abc import abstractmethod
 from typing import Callable
 
-
 """
 JAX-based workflow is slightly different.
 Implement a curve that inherits from LearnableCurve (so, implement position, velocity, acceleration, and jerk).
@@ -408,7 +407,7 @@ class CompiledControls( eq.Module ):
             diffrax.ODETerm(interaction_system),
             diffrax.Dopri5(),
             0, self.curve.tf, 
-            dt0=self.samples,
+            dt0=self.curve.tf / self.samples,
             y0=jnp.eye( H_in.shape[0] * 2, dtype=jnp.complex64 ),
             args={ "U_I" : self.U_I, "H_input" : H_in },
             progress_meter=diffrax.TqdmProgressMeter()
