@@ -9,7 +9,6 @@ from warnings import warn
 from abc import abstractmethod
 from typing import Callable
 
-from integrator import SobolRQMC
 
 """
 JAX-based workflow is slightly different.
