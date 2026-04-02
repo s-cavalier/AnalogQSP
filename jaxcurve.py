@@ -9,6 +9,8 @@ from warnings import warn
 from abc import abstractmethod
 from typing import Callable
 
+from integrator import SobolRQMC
+
 """
 JAX-based workflow is slightly different.
 Implement a curve that inherits from LearnableCurve (so, implement position, velocity, acceleration, and jerk).
@@ -183,6 +185,36 @@ class LearnableCurve(eq.Module):
         beta_n = self._pi_beta(velocities)
 
         return jnp.real((1.0j**(1-order)) * volume * jnp.mean(weight[:, None] * beta_n, axis=0))
+
+    @eq.filter_jit
+    def error_bound_maximum(self, samples=4096):
+        # find max_{s, t} \| T(s) \times T(t) \|
+        # use relation max_{s,t} \| T(s) \times T(t) \| = \sqrt{ 1 - min_{s,t \in [0, t]} (T(s) \cdot T(t))^2 }
+        # gradient: 
+
+        def tangent( curve: LearnableCurve, t: float ) -> jnp.ndarray:
+            velocity = curve.velocity(t)
+            return velocity / jnp.linalg.norm(velocity)
+
+        ts = jnp.linspace(0.0, self.curve.tf, samples)
+        Ts : jnp.ndarray = jax.vmap(tangent)(ts)
+
+        G = Ts @ Ts.T                 # shape (n, n)
+
+        # --- 4. minimize G^2 (avoid s=t) ---
+        G2 = G**2
+
+        # mask diagonal (s == t)
+        G2 = G2 + jnp.eye(samples) * 1e6
+
+        idx = jnp.argmin(G2)
+
+        i = idx // samples
+        j = idx % samples
+
+        max_val = jnp.sqrt(1.0 - G[i, j]**2)
+
+        return max_val
 
     # fancy plots
 
@@ -390,6 +422,26 @@ class CompiledControls( eq.Module ):
             saveat=diffrax.SaveAt(dense=True)
         )
 
+    @eq.filter_jit
+    def error_bound(self, H_in: jnp.ndarray, degree: int):
+        """
+        Calculate analytic error bound with highest inclusive degree as degree
+        """
+
+        DELTA_CONSTANT = 0.920075
+
+        prefactor = 4 / ( (degree + 1)**2 )
+        
+        h_max = jnp.linalg.matrix_norm( jnp.linalg.matrix_power( H_in, degree ), ord=2 )
+
+        tangent_error = self.curve.error_bound_maximum()
+
+        arclen = self.curve.arclength()
+
+        primary_factor = DELTA_CONSTANT * h_max * tangent_error * arclen
+
+        return prefactor * ( (primary_factor)**(degree + 1) )/( 1 - primary_factor )
+
     def __call__(self, H_in : jnp.ndarray):
 
         @eq.filter_jit
@@ -410,7 +462,7 @@ class CompiledControls( eq.Module ):
             dt0=self.curve.tf / self.samples,
             y0=jnp.eye( H_in.shape[0] * 2, dtype=jnp.complex64 ),
             args={ "U_I" : self.U_I, "H_input" : H_in },
-            progress_meter=diffrax.TqdmProgressMeter()
+            #progress_meter=diffrax.TqdmProgressMeter()
         )
 
         return result

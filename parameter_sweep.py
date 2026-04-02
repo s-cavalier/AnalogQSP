@@ -16,7 +16,7 @@ if __name__ == "__main__":
     runs = int(argv[2])
     use_callback = bool(argv[3])
 
-    errors = np.empty((runs, 4))
+    errors = np.empty((runs, 3))
 
     iters = trange(runs) if use_callback else range(runs)
 
@@ -27,13 +27,14 @@ if __name__ == "__main__":
     tree_deserialise_leaves('bezier.eqx', curve)
 
     for sweep_idx in trange(runs):
+        key, subkey = jax.random.split(key, 2)
 
-        paulis = jax.random.uniform(key, (3,), maxval=0.33)
+        paulis = jax.random.uniform(subkey, (2,), maxval=0.4999999)
+        
         errors[sweep_idx, 0] = paulis[0].item()
         errors[sweep_idx, 1] = paulis[1].item()
-        errors[sweep_idx, 2] = paulis[2].item()
 
-        H_in = make_traceless_H(*paulis)
+        H_in = make_traceless_H(*paulis, 0)
 
         diffrax_res = system(H_in)
         realized_unitary = jnp.asarray( diffrax_res.ys )[0]
@@ -47,20 +48,20 @@ if __name__ == "__main__":
 
         final_error : jnp.ndarray = jnp.linalg.matrix_norm( realized_unitary - expected, ord=2 )
 
-        errors[sweep_idx, 3] = final_error.item()
+        errors[sweep_idx, 2] = final_error.item()
 
     np.save('errors.npz', errors)
+
+    data = np.load
 
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(projection='3d')
 
-    p = ax.scatter( errors[:, 0], errors[:, 1], errors[:, 2], c=errors[:, 3], cmap='viridis' )
-    cbar = fig.colorbar(p, ax=ax, pad=0.1)
-    cbar.set_label(r'Error $ \left\| \exp\left(-i \left(\sum_{k=1}^d = c_k H^k \right) \otimes \sigma_z \right) - U_{actual}(T_g) \right\| $')
+    p = ax.scatter( errors[:, 0], errors[:, 1], errors[:, 2], c=errors[:, 3])
 
     ax.set_xlabel(r'$\sigma_x$')
     ax.set_ylabel(r'$\sigma_y$')
     ax.set_zlabel(r'$\sigma_z$')
 
-    fig.savefig('error_sweep.png')
+    fig.savefig('error_sweep2d.png')
 
