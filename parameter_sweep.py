@@ -2,6 +2,7 @@ from sys import argv
 import numpy as np
 import jax.numpy as jnp
 import jax
+from equinox import tree_deserialise_leaves
 from tqdm import trange, tqdm
 import matplotlib.pyplot as plt
 from time import sleep
@@ -15,38 +16,17 @@ if __name__ == "__main__":
     runs = int(argv[2])
     use_callback = bool(argv[3])
 
-    discard = jnp.empty((1,)) # discard so the jax log comes before this
-    sleep(1) 
-
     errors = np.empty((runs, 4))
-
-    rng = np.random.default_rng(seed)
 
     iters = trange(runs) if use_callback else range(runs)
 
+    key = jax.random.key(seed)
+    curve = BezierCurve(32, [0, 0, 0], key)
+    system = CompiledControls(curve)
+
+    tree_deserialise_leaves('bezier.eqx', curve)
+
     for sweep_idx in trange(runs):
-        key = jax.random.key( rng.integers(0, 2_000_000_000).item() )
-        curve = BezierCurve(32, [0, 0, 0], key)
-
-
-        def cost_fn( c: LearnableCurve, k: jnp.ndarray ):
-            m2 = 2048 * jnp.linalg.norm(c.magnus(2, k, 10_000) - jnp.array([0, 0, -1/6])) # -1/6
-            m3 = 8192 * jnp.linalg.norm(c.magnus(3, k, 10_000) - jnp.array([0, 0, 0])) # 0
-            m4 = 4096 * jnp.linalg.norm(c.magnus(4, k, 10_000) - jnp.array([0, 0, 1/120])) # 1/120
-            m5 = 8192 * jnp.linalg.norm(c.magnus(5, k, 10_000) - jnp.array([0, 0, 0])) # 0
-            m6 = 16384 * jnp.linalg.norm(c.magnus(6, k, 10_000) - jnp.array([0, 0, -1/5040])) # -1/5040
-
-            return m2 + m3 + m4 + m5 + m6
-
-        STEPS = 15_000
-        
-        bar = tqdm(total=STEPS, leave=False)
-
-        def callback( step, loss, curve ): bar.update(1)
-
-        used_callback = callback if use_callback else None
-
-        curve : BezierCurve = curve.optimize(cost_fn, key, steps=STEPS, lr=1e-3, callback=used_callback)
 
         paulis = jax.random.uniform(key, (3,), maxval=0.33)
         errors[sweep_idx, 0] = paulis[0].item()
@@ -55,9 +35,7 @@ if __name__ == "__main__":
 
         H_in = make_traceless_H(*paulis)
 
-        system = CompiledControls(curve)
         diffrax_res = system(H_in)
-
         realized_unitary = jnp.asarray( diffrax_res.ys )[0]
 
         pow2 : jnp.ndarray = jnp.linalg.matrix_power(H_in, 2)
@@ -67,9 +45,11 @@ if __name__ == "__main__":
         target_polynomial = pow2 / 6 + pow4 / 120 - pow6 / 5040
         expected = jax.scipy.linalg.expm(-1j * jnp.kron(target_polynomial, sig_z()))
 
-        final_error : jnp.ndarray = jnp.linalg.norm( realized_unitary - expected )
+        final_error : jnp.ndarray = jnp.linalg.matrix_norm( realized_unitary - expected, ord=2 )
 
         errors[sweep_idx, 3] = final_error.item()
+
+    np.save('errors.npz', errors)
 
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(projection='3d')
