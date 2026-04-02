@@ -31,7 +31,7 @@ class BezierCurve(LearnableCurve):
         if num_control_points <= 6: raise ValueError("num_control_points must be greater than 6")
         if key is not None and seed is not None: raise ValueError("pass at most one of key or seed")
 
-        endpoint = jnp.asarray(endpoint, dtype=jnp.float64)
+        endpoint = jnp.asarray(endpoint, dtype=jnp.float32)
         if endpoint.shape != (3,): raise ValueError("endpoint must be a 3D point")
 
         degree = num_control_points - 1
@@ -53,19 +53,19 @@ class BezierCurve(LearnableCurve):
         self.free_control_points = randomized_free_points
         self.binomial_coeffs = jnp.asarray(
             [math.comb(degree, i) for i in range(degree + 1)],
-            dtype=jnp.uint32,
+            dtype=jnp.uint64,
         )
         self.velocity_binomial_coeffs = jnp.asarray(
             [math.comb(degree - 1, i) for i in range(degree)],
-            dtype=jnp.uint32,
+            dtype=jnp.uint64,
         )
         self.acceleration_binomial_coeffs = jnp.asarray(
             [math.comb(degree - 2, i) for i in range(degree - 1)],
-            dtype=jnp.uint32,
+            dtype=jnp.uint64,
         )
         self.jerk_binomial_coeffs = jnp.asarray(
             [math.comb(degree - 3, i) for i in range(degree - 2)],
-            dtype=jnp.uint32,
+            dtype=jnp.uint64,
         )
 
     def trainable_filter_spec(self):

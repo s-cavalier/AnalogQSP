@@ -2,6 +2,7 @@ import equinox as eq
 import jax
 import jax.numpy as jnp
 import optax
+import diffrax
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from warnings import warn
@@ -347,6 +348,75 @@ class LearnableCurve(eq.Module):
                     step_counter += 1
 
         return eq.combine(params, static)
+
+@jax.jit
+def sig_x(): return jnp.array([[0, 1], [1, 0]], dtype=jnp.complex64)
+
+@jax.jit
+def sig_y(): return jnp.array([[0, -1j], [1j, 0]], dtype=jnp.complex64)
+
+@jax.jit
+def sig_z(): return jnp.array([[1, 0], [0, -1]], dtype=jnp.complex64)
+
+@jax.jit
+def make_traceless_H(a, b, c): return sig_x() * a + sig_y() * b + sig_z() * c
+
+class CompiledControls( eq.Module ):
+    curve: LearnableCurve
+    U_I: diffrax.Solution
+    samples: int = eq.field(static=True)
+
+    def __init__(self, curve: LearnableCurve, samples=4096):
+        self.curve = curve
+        self.samples = samples
+
+        @eq.filter_jit
+        def drive_system(t: float, U: jnp.ndarray, args):
+            curve : LearnableCurve = args['curve']
+
+            curvature = curve.curvature(t).astype(dtype=jnp.complex64) /2
+            phi = curve.phi(t).astype(jnp.complex64)
+
+            H = curvature * ( jnp.cos(phi) * sig_x() + jnp.sin(phi) * sig_y() )
+
+            return -1j * H @ U
+
+        self.U_I = diffrax.diffeqsolve( 
+            diffrax.ODETerm(drive_system), 
+            diffrax.Dopri5(), 
+            0, self.curve.tf,
+            dt0=self.curve.tf/self.samples,
+            y0=jnp.eye(2, dtype=jnp.complex64),
+            args={ "curve" : self.curve },
+            saveat=diffrax.SaveAt(dense=True)
+        )
+
+    def __call__(self, H_in : jnp.ndarray):
+
+        @eq.filter_jit
+        def interaction_system(t: float, U: jnp.ndarray, args):
+            U_I : diffrax.Solution = args["U_I"]
+            ui_t : jnp.ndarray = jnp.asarray(U_I.evaluate(t))
+
+            H_input : jnp.ndarray = args["H_input"]
+
+            ham = jnp.kron( H_input, ui_t @ sig_z() @ ui_t.T.conj() )
+
+            return -1j * ham @ U
+        
+        result = diffrax.diffeqsolve(
+            diffrax.ODETerm(interaction_system),
+            diffrax.Dopri5(),
+            0, self.curve.tf, 
+            dt0=self.samples,
+            y0=jnp.eye( H_in.shape[0] * 2, dtype=jnp.complex64 ),
+            args={ "U_I" : self.U_I, "H_input" : H_in },
+            progress_meter=diffrax.TqdmProgressMeter()
+        )
+
+        return result
+
+
 
 class ArclenParameterize(LearnableCurve):
     """
