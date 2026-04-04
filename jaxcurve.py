@@ -85,8 +85,9 @@ class LearnableCurve(eq.Module):
     def phi(self, t: jnp.ndarray, samples=4096) -> jnp.ndarray:
         time = jnp.linspace(self.t0, t, samples)
         torsion = jax.vmap( self.torsion )(time)
+        speed = jax.vmap( lambda x: jnp.linalg.norm( self.velocity(x) ) )(time)
 
-        return jax.scipy.integrate.trapezoid( y=torsion, x=time )
+        return jax.scipy.integrate.trapezoid( y=speed * torsion, x=time )
 
     @eq.filter_jit
     def max_curvature(self, samples = 4096):
@@ -207,14 +208,12 @@ class LearnableCurve(eq.Module):
     def error_bound(self, H_in: jnp.ndarray, degree: int, minimizer_samples=4096, arclen_samples=4096):
         DELTA_CONSTANT = 0.920075
 
-        eta = self.error_bound_control(minimizer_samples)
-
-        h_max = jnp.linalg.norm(H_in, ord=2)
+        h_max = jnp.linalg.matrix_norm(H_in, ord=2)
 
         t = self.arclength(arclen_samples)   
         rho = DELTA_CONSTANT * h_max * t
 
-        return (4.0 * eta / ((degree + 1) ** 2)) * (rho ** (degree + 1)) / (1.0 - rho)
+        return (4.0 / ((degree + 1) ** 2)) * (rho ** (degree + 1)) / (1.0 - rho)
 
     @eq.filter_jit
     def test_error_convergence(self, H_in: jnp.ndarray):
@@ -399,6 +398,9 @@ def sig_y(): return jnp.array([[0, -1j], [1j, 0]], dtype=jnp.complex64)
 def sig_z(): return jnp.array([[1, 0], [0, -1]], dtype=jnp.complex64)
 
 @jax.jit
+def paulis(): return jnp.stack([sig_x(), sig_y(), sig_z()])
+
+@jax.jit
 def make_traceless_H(a, b, c): return sig_x() * a + sig_y() * b + sig_z() * c
 
 class CompiledControls( eq.Module ):
@@ -414,45 +416,50 @@ class CompiledControls( eq.Module ):
         def drive_system(t: float, U: jnp.ndarray, args):
             curve : LearnableCurve = args['curve']
 
-            curvature = curve.curvature(t).astype(dtype=jnp.complex64) /2
+            speed = jnp.linalg.norm( curve.velocity(t) )
+            curvature = curve.curvature(t).astype(dtype=jnp.complex64)
             phi = curve.phi(t).astype(jnp.complex64)
 
-            H = curvature * ( jnp.cos(phi) * sig_x() + jnp.sin(phi) * sig_y() )
+            Omega = 0.5 * speed * curvature
+
+            H = Omega * ( jnp.cos(phi) * sig_x() + jnp.sin(phi) * sig_y() )
 
             return -1j * H @ U
 
         self.U_I = diffrax.diffeqsolve( 
             diffrax.ODETerm(drive_system), 
             diffrax.Dopri5(), 
-            0, self.curve.tf,
-            dt0=self.curve.tf/self.samples,
-            y0=jnp.eye(2, dtype=jnp.complex64),
+            self.curve.t0, self.curve.tf,
+            dt0=(self.curve.tf - self.curve.t0)/self.samples,
+            y0=jnp.eye(2),
             args={ "curve" : self.curve },
             saveat=diffrax.SaveAt(dense=True)
         )
-
-    
 
     def __call__(self, H_in : jnp.ndarray):
 
         @eq.filter_jit
         def interaction_system(t: float, U: jnp.ndarray, args):
             U_I : diffrax.Solution = args["U_I"]
+            curve : LearnableCurve = args["curve"]
+
             ui_t : jnp.ndarray = jnp.asarray(U_I.evaluate(t))
 
             H_input : jnp.ndarray = args["H_input"]
 
-            ham = jnp.kron( H_input, ui_t @ sig_z() @ ui_t.T.conj() )
+            speed = jnp.linalg.norm( curve.velocity(t) )
+
+            ham = speed * jnp.kron( H_input, ui_t @ sig_z() @ ui_t.T.conj() )
 
             return -1j * ham @ U
         
         result = diffrax.diffeqsolve(
             diffrax.ODETerm(interaction_system),
             diffrax.Dopri5(),
-            0, self.curve.tf, 
-            dt0=self.curve.tf / self.samples,
+            self.curve.t0, self.curve.tf, 
+            dt0=(self.curve.tf - self.curve.t0) / self.samples,
             y0=jnp.eye( H_in.shape[0] * 2, dtype=jnp.complex64 ),
-            args={ "U_I" : self.U_I, "H_input" : H_in },
+            args={ "U_I" : self.U_I, "H_input" : H_in, "curve" : self.curve},
             #progress_meter=diffrax.TqdmProgressMeter()
         )
 
