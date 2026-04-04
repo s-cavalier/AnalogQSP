@@ -61,12 +61,15 @@ class LearnableCurve(eq.Module):
     def curvature(self, t: jnp.ndarray, eps: float = 1e-8) -> jnp.ndarray:
         v = self.velocity(t)
         a = self.acceleration(t)
+        eps = jnp.asarray(eps, dtype=jnp.result_type(v.dtype, a.dtype))
 
-        speed = jnp.linalg.norm(v, axis=-1)
-        cross_mag = jnp.linalg.norm(jnp.cross(v, a, axis=-1), axis=-1)
-        denom = speed ** 3
+        speed_sq = jnp.sum(v * v, axis=-1)
+        cross_sq = jnp.sum(jnp.cross(v, a, axis=-1) ** 2, axis=-1)
 
-        return cross_mag / (denom + eps)
+        speed = jnp.sqrt(speed_sq + eps * eps)
+        cross_mag = jnp.sqrt(cross_sq + eps * eps) - eps
+
+        return cross_mag / (speed ** 3)
 
     @eq.filter_jit
     def torsion(self, t: jnp.ndarray, eps = 1e-8) -> jnp.ndarray:
@@ -213,7 +216,9 @@ class LearnableCurve(eq.Module):
         t = self.arclength(arclen_samples)   
         rho = DELTA_CONSTANT * h_max * t
 
-        return (4.0 / ((degree + 1) ** 2)) * (rho ** (degree + 1)) / (1.0 - rho)
+        eta = self.error_bound_control()
+
+        return (4.0 * eta / ((degree + 1) ** 2)) * (rho ** (degree + 1)) / (1.0 - rho)
 
     @eq.filter_jit
     def test_error_convergence(self, H_in: jnp.ndarray):
@@ -431,7 +436,7 @@ class CompiledControls( eq.Module ):
             diffrax.Dopri5(), 
             self.curve.t0, self.curve.tf,
             dt0=(self.curve.tf - self.curve.t0)/self.samples,
-            y0=jnp.eye(2),
+            y0=jnp.eye(2, dtype=jnp.complex64),
             args={ "curve" : self.curve },
             saveat=diffrax.SaveAt(dense=True)
         )
@@ -449,7 +454,7 @@ class CompiledControls( eq.Module ):
 
             speed = jnp.linalg.norm( curve.velocity(t) )
 
-            ham = speed * jnp.kron( H_input, ui_t @ sig_z() @ ui_t.T.conj() )
+            ham = speed * jnp.kron( H_input, ui_t.T.conj() @ sig_z() @ ui_t )
 
             return -1j * ham @ U
         
@@ -459,7 +464,7 @@ class CompiledControls( eq.Module ):
             self.curve.t0, self.curve.tf, 
             dt0=(self.curve.tf - self.curve.t0) / self.samples,
             y0=jnp.eye( H_in.shape[0] * 2, dtype=jnp.complex64 ),
-            args={ "U_I" : self.U_I, "H_input" : H_in, "curve" : self.curve},
+            args={ "U_I" : self.U_I, "H_input" : H_in, "curve" : self.curve, },
             #progress_meter=diffrax.TqdmProgressMeter()
         )
 

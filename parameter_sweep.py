@@ -22,7 +22,15 @@ if __name__ == "__main__":
 
     key = jax.random.key(seed)
     curve : BezierCurve = tree_deserialise_leaves('bezier.eqx', BezierCurve(32, [0, 0, 0], key))
-    coefs = jnp.array([-1/6, 0, 1/120, 0, -1/5040])
+
+    key, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
+    coefs = jnp.stack([
+        curve.magnus(2, k2, 8192),
+        curve.magnus(3, k3, 8192),
+        curve.magnus(4, k4, 8192),
+        curve.magnus(5, k5, 8192),
+        curve.magnus(6, k6, 8192)
+    ])
 
     system = CompiledControls(curve)
 
@@ -46,13 +54,17 @@ if __name__ == "__main__":
         
         _, powers = jax.lax.scan(step, H_in, None, length=5)
 
-        expected = jax.scipy.linalg.expm(-1j * jnp.kron( jnp.sum(coefs[:, None, None] * powers, axis=0), sig_z() ) )
+        p = jnp.einsum('kc,kij->cij', coefs, powers)
+
+        f_H = jnp.kron( p[0], sig_x() ) + jnp.kron( p[1], sig_y() ) + jnp.kron( p[2], sig_z() )
+
+        expected = jax.scipy.linalg.expm(-1j * f_H)
 
         final_error : jnp.ndarray = jnp.linalg.matrix_norm( realized_unitary - expected, ord=2 )
 
         errors[sweep_idx, 3] = final_error.item()
 
-    np.save('errors', errors)
+    np.save('true_error', errors)
 
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(projection='3d')
@@ -67,4 +79,3 @@ if __name__ == "__main__":
     cb.set_label('Error')
 
     fig.savefig('error_sweep.png')
-
