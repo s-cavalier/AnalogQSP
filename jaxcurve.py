@@ -186,34 +186,44 @@ class LearnableCurve(eq.Module):
         return jnp.real((1.0j**(1-order)) * volume * jnp.mean(weight[:, None] * beta_n, axis=0))
 
     @eq.filter_jit
-    def error_bound_maximum(self, samples=4096):
-        # find max_{s, t} \| T(s) \times T(t) \|
-        # use relation max_{s,t} \| T(s) \times T(t) \| = \sqrt{ 1 - min_{s,t \in [0, t]} (T(s) \cdot T(t))^2 }
-        # gradient: 
+    def tangent(self, t: float) -> jnp.ndarray:
+        velocity = self.velocity(t)
+        return velocity / jnp.linalg.norm(velocity)
 
-        def tangent( curve: LearnableCurve, t: float ) -> jnp.ndarray:
-            velocity = curve.velocity(t)
-            return velocity / jnp.linalg.norm(velocity)
+    @eq.filter_jit
+    def error_bound_control(self, samples=4096):
+        ts = jnp.linspace(0.0, self.tf, samples)
+        Ts = jax.vmap(self.tangent)(ts)
 
-        ts = jnp.linspace(0.0, self.curve.tf, samples)
-        Ts : jnp.ndarray = jax.vmap(tangent)(ts)
+        G = Ts @ Ts.T
 
-        G = Ts @ Ts.T                 # shape (n, n)
+        vals = jnp.sqrt(jnp.clip(1.0 - G**2, 0.0, 1.0))
 
-        # --- 4. minimize G^2 (avoid s=t) ---
-        G2 = G**2
+        vals = vals - jnp.eye(samples) * 2.0  
 
-        # mask diagonal (s == t)
-        G2 = G2 + jnp.eye(samples) * 1e6
+        return jnp.max(vals)
 
-        idx = jnp.argmin(G2)
+    @eq.filter_jit
+    def error_bound(self, H_in: jnp.ndarray, degree: int, minimizer_samples=4096, arclen_samples=4096):
+        DELTA_CONSTANT = 0.920075
 
-        i = idx // samples
-        j = idx % samples
+        eta = self.error_bound_control(minimizer_samples)
 
-        max_val = jnp.sqrt(1.0 - G[i, j]**2)
+        h_max = jnp.linalg.norm(H_in, ord=2)
 
-        return max_val
+        t = self.arclength(arclen_samples)   
+        rho = DELTA_CONSTANT * h_max * t
+
+        return (4.0 * eta / ((degree + 1) ** 2)) * (rho ** (degree + 1)) / (1.0 - rho)
+
+    @eq.filter_jit
+    def test_error_convergence(self, H_in: jnp.ndarray):
+        DELTA_CONSTANT = 0.920075
+        h_max = jnp.linalg.matrix_norm(H_in, ord=2)
+        t = self.arclength()
+
+        return DELTA_CONSTANT * h_max * t < 1
+
 
     # fancy plots
 
@@ -421,25 +431,7 @@ class CompiledControls( eq.Module ):
             saveat=diffrax.SaveAt(dense=True)
         )
 
-    @eq.filter_jit
-    def error_bound(self, H_in: jnp.ndarray, degree: int):
-        """
-        Calculate analytic error bound with highest inclusive degree as degree
-        """
-
-        DELTA_CONSTANT = 0.920075
-
-        prefactor = 4 / ( (degree + 1)**2 )
-        
-        h_max = jnp.linalg.matrix_norm( jnp.linalg.matrix_power( H_in, degree ), ord=2 )
-
-        tangent_error = self.curve.error_bound_maximum()
-
-        arclen = self.curve.arclength()
-
-        primary_factor = DELTA_CONSTANT * h_max * tangent_error * arclen
-
-        return prefactor * ( (primary_factor)**(degree + 1) )/( 1 - primary_factor )
+    
 
     def __call__(self, H_in : jnp.ndarray):
 
