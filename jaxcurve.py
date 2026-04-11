@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from warnings import warn
 from abc import abstractmethod
-from typing import Callable
+from typing import Callable, Self
 
 
 """
@@ -328,7 +328,14 @@ class LearnableCurve(eq.Module):
         fig.colorbar(scatter, ax=ax, pad=0.08, shrink=0.82, label=r'$t$')
         fig.tight_layout()
         plt.show()
-    
+
+    def saveto(self, path: str):
+        eq.tree_serialise_leaves(path, self)
+
+    @classmethod
+    def loadfrom(cls, path: str, *init_args, **init_kwargs) -> Self:
+        return eq.tree_deserialise_leaves(path, cls(*init_args, **init_kwargs))
+
     def optimize(
         self,
         cost_fn: Callable[["LearnableCurve", jnp.ndarray], jnp.ndarray],
