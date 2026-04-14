@@ -3,12 +3,23 @@ import jax
 import jax.numpy as jnp
 import optax
 import diffrax
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from warnings import warn
 from abc import abstractmethod
 from typing import Callable, Self
+from functools import lru_cache
 
+def _cumulative_trapezoid(values: jnp.ndarray, dx):
+    partial = jnp.cumsum((values[1:] + values[:-1]) * (0.5 * dx), axis=0)
+    return jnp.concatenate([jnp.zeros_like(values[:1]), partial], axis=0)
+
+
+@lru_cache(maxsize=None)
+def _gauss_legendre_01(order: int):
+    nodes, weights = np.polynomial.legendre.leggauss(order)
+    return (nodes + 1.0) * 0.5, weights * 0.5
 
 """
 JAX-based workflow is slightly different.
@@ -90,7 +101,7 @@ class LearnableCurve(eq.Module):
         torsion = jax.vmap( self.torsion )(time)
         speed = jax.vmap( lambda x: jnp.linalg.norm( self.velocity(x) ) )(time)
 
-        return jax.scipy.integrate.trapezoid( y=speed * torsion, x=time )
+        return jax.scipy.integrate.trapezoid( y=speed * torsion, x=time ) 
 
     @eq.filter_jit
     def max_curvature(self, samples = 4096):
@@ -174,7 +185,7 @@ class LearnableCurve(eq.Module):
         return beta_n
 
     @eq.filter_jit
-    def magnus(self, order, key, samples = 4096):
+    def magnus_mc(self, order, key, samples = 4096):
         volume = (self.tf - self.t0) ** order
         sample_times = jax.random.uniform(
             key,
@@ -188,6 +199,50 @@ class LearnableCurve(eq.Module):
         beta_n = self._pi_beta(velocities)
 
         return jnp.real((1.0j**(1-order)) * volume * jnp.mean(weight[:, None] * beta_n, axis=0))
+
+    @eq.filter_jit
+    def magnus(self, n: int, samples = 4096):
+        if n < 1:
+            raise ValueError("n must be at least 1")
+        if samples < 2:
+            raise ValueError("samples must be at least 2")
+        if n == 1:
+            return self.position(self.tf) - self.position(self.t0)
+
+        time = jnp.linspace(self.t0, self.tf, samples)
+        T = jax.vmap(self.velocity)(time)
+        dt = (self.tf - self.t0) / (samples - 1)
+
+        complex_dtype = jnp.result_type(T.dtype, jnp.complex64)
+        T = T.astype(complex_dtype)
+
+        x_order = (n + 1) // 2
+        x_nodes_np, x_weights_np = _gauss_legendre_01(x_order)
+        x_nodes = jnp.asarray(x_nodes_np, dtype=T.real.dtype)
+        x_weights = jnp.asarray(x_weights_np, dtype=T.real.dtype)
+        shift = x_nodes - 1.0
+
+        n_x = x_nodes.shape[0]
+        Y_a = jnp.zeros((samples, n_x), dtype=complex_dtype)
+        Y_b = jnp.broadcast_to(T[:, None, :], (samples, n_x, 3))
+
+        for _ in range(1, n):
+            prefix_a = _cumulative_trapezoid(Y_a, dt)
+            prefix_b = _cumulative_trapezoid(Y_b, dt)
+
+            total_a = prefix_a[-1]
+            total_b = prefix_b[-1]
+
+            S_a = prefix_a + shift[None, :] * total_a[None, :]
+            S_b = prefix_b + shift[None, :, None] * total_b[None, :, :]
+
+            Y_a = jnp.einsum("td,txd->tx", T, S_b)
+            Y_b = S_a[:, :, None] * T[:, None, :] + 1j * jnp.cross(T[:, None, :], S_b, axis=-1)
+
+        final_b = _cumulative_trapezoid(Y_b, dt)[-1]
+        value = jnp.sum(x_weights[:, None] * final_b, axis=0)
+
+        return jnp.real((1.0j ** (1 - n)) * value)
 
     @eq.filter_jit
     def tangent(self, t: float) -> jnp.ndarray:
@@ -391,6 +446,86 @@ class LearnableCurve(eq.Module):
             params, opt_state, key, losses = train_chunk(
                 params, opt_state, key
             )
+
+            if callback is not None:
+                model = eq.combine(params, static)
+                for loss in losses:
+                    callback(step_counter, float(loss), model)
+                    step_counter += 1
+
+        return eq.combine(params, static)
+
+    def optimize_lbfgs(
+        self,
+        cost_fn: Callable[["LearnableCurve", jnp.ndarray], jnp.ndarray],
+        key: jnp.ndarray,
+        steps: int = 200,
+        chunk_size: int = 10,
+        memory_size: int = 10,
+        lr = None,
+        scale_init_precond: bool = True,
+        linesearch = None,
+        filter_spec = None,
+        callback=None,
+    ):
+        assert steps % chunk_size == 0, "steps must be divisible by chunk_size"
+
+        if filter_spec is None:
+            filter_spec = self.trainable_filter_spec()
+
+        params, static = eq.partition(self, filter_spec)
+
+        if linesearch is None:
+            optimizer = optax.lbfgs(
+                learning_rate=lr,
+                memory_size=memory_size,
+                scale_init_precond=scale_init_precond,
+            )
+        else:
+            optimizer = optax.lbfgs(
+                learning_rate=lr,
+                memory_size=memory_size,
+                scale_init_precond=scale_init_precond,
+                linesearch=linesearch,
+            )
+
+        opt_state = optimizer.init(params)
+
+        def loss_fn(params, key):
+            return cost_fn(eq.combine(params, static), key)
+
+        value_and_grad = optax.value_and_grad_from_state(loss_fn)
+
+        @eq.filter_jit
+        def train_chunk(params, opt_state, key):
+            def body_fn(carry, _):
+                params, opt_state, key = carry
+                value, grad = value_and_grad(params, key, state=opt_state)
+                updates, opt_state = optimizer.update(
+                    grad,
+                    opt_state,
+                    params,
+                    value=value,
+                    grad=grad,
+                    value_fn=loss_fn,
+                    key=key,
+                )
+                params = optax.apply_updates(params, updates)
+                return (params, opt_state, key), value
+
+            (params, opt_state, key), losses = jax.lax.scan(
+                body_fn,
+                (params, opt_state, key),
+                None,
+                length=chunk_size,
+            )
+
+            return params, opt_state, key, losses
+
+        step_counter = 0
+
+        for _ in range(steps // chunk_size):
+            params, opt_state, key, losses = train_chunk(params, opt_state, key)
 
             if callback is not None:
                 model = eq.combine(params, static)
