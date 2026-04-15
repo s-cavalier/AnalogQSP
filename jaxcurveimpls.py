@@ -14,7 +14,7 @@ def _binomial_coefficients(degree: int, dtype) -> jnp.ndarray:
 def _evaluate_bezier(t: jnp.ndarray, control_points: jnp.ndarray, coefficients: jnp.ndarray) -> jnp.ndarray:
     degree = control_points.shape[0] - 1
     t = jnp.asarray(t, dtype=control_points.dtype)
-    exponents = jnp.arange(degree + 1, dtype=jnp.int32)
+    exponents = jnp.arange(degree + 1)
     basis = (
         coefficients
         * jnp.power(t[..., None], exponents)
@@ -42,7 +42,7 @@ class BezierCurve(LearnableCurve):
         if num_control_points < 6:
             raise ValueError("num_control_points must be at least 6 to satisfy the endpoint curvature constraints.")
 
-        endpoint = jnp.asarray(endpoint, dtype=jnp.float32)
+        endpoint = jnp.asarray(endpoint)
         if endpoint.shape != (3,):
             raise ValueError("endpoint must have shape (3,).")
 
@@ -95,7 +95,6 @@ class BezierCurve(LearnableCurve):
         origin = jnp.zeros((1, 3), dtype=self.free_control_points.dtype)
         endpoint = self.endpoint[None, :]
 
-        # These derived points enforce r'(0) = (0, 0, 1) and r''(0) = r''(1) = 0 exactly.
         antepenultimate = 2.0 * penultimate - endpoint
 
         return jnp.concatenate(
