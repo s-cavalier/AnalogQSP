@@ -101,7 +101,7 @@ class LearnableCurve(eq.Module):
         torsion = jax.vmap( self.torsion )(time)
         speed = jax.vmap( lambda x: jnp.linalg.norm( self.velocity(x) ) )(time)
 
-        d3r_x, d3r_y, _ = self.jerk(0)
+        d3r_x, d3r_y, _ = self.jerk(self.t0)
         azimuth_fix = jnp.atan2( -d3r_x, d3r_y )
 
         return jax.scipy.integrate.trapezoid( y=speed * torsion, x=time ) + azimuth_fix
@@ -644,6 +644,34 @@ class CompiledControls( eq.Module ):
 
         return result
 
+class InvertedCurve(LearnableCurve):
+    """
+    Note: Feasible invertibility requires that base.tangent(base.tf) == [0, 0, -1].
+    Otherwise simulation will not hold up.
+    """
+
+    base: LearnableCurve
+
+    def __init__(self, base: LearnableCurve):
+        super().__init__(base.t0, base.tf)
+        self.base = base
+
+    def inverter(self, t: jnp.ndarray) -> jnp.ndarray:
+        return self.t0 + self.tf - t 
+
+    def position(self, t: jnp.ndarray) -> jnp.ndarray:
+        return self.base.position( self.inverter(t) )
+    
+    def velocity(self, t: jnp.ndarray) -> jnp.ndarray:
+        return -self.base.velocity(self.inverter(t))
+    
+    def acceleration(self, t: jnp.ndarray) -> jnp.ndarray:
+        return self.base.acceleration(self.inverter(t))
+    
+    def jerk(self, t: jnp.ndarray) -> jnp.ndarray:
+        return -self.base.jerk(self.inverter(t))
+    
+    
 
 
 class ArclenParameterize(LearnableCurve):
