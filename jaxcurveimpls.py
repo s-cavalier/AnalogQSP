@@ -25,8 +25,11 @@ def _evaluate_bezier(t: jnp.ndarray, control_points: jnp.ndarray, coefficients: 
 
 class BezierCurve(LearnableCurve):
     num_control_points: int = eq.field(static=True)
+    invertible: bool = eq.field(static=True)
     endpoint: jnp.ndarray
     free_control_points: jnp.ndarray
+    initial_velocity_log_scale: jnp.ndarray
+    final_velocity_log_scale: jnp.ndarray | None
     _position_coefficients: jnp.ndarray = eq.field(repr=False)
     _velocity_coefficients: jnp.ndarray = eq.field(repr=False)
     _acceleration_coefficients: jnp.ndarray = eq.field(repr=False)
@@ -34,50 +37,55 @@ class BezierCurve(LearnableCurve):
 
     def __init__(
         self,
-        num_control_points: int,
+        n_ctrl_pts: int,
         endpoint,
+        invertible: bool,
         key: jax.Array | None = None,
         init_scale: float = 0.1,
     ):
-        if num_control_points < 6:
-            raise ValueError("num_control_points must be at least 6 to satisfy the endpoint curvature constraints.")
+        if n_ctrl_pts < 6:
+            raise ValueError("n_ctrl_pts must be at least 6 to satisfy the endpoint curvature constraints.")
 
         endpoint = jnp.asarray(endpoint)
+        if not jnp.issubdtype(endpoint.dtype, jnp.inexact):
+            endpoint = endpoint.astype(jnp.float32)
         if endpoint.shape != (3,):
             raise ValueError("endpoint must have shape (3,).")
 
-        self.num_control_points = int(num_control_points)
+        self.num_control_points = int(n_ctrl_pts)
+        self.invertible = bool(invertible)
         self.endpoint = endpoint
 
         degree = self.num_control_points - 1
         dtype = endpoint.dtype
-        initial_velocity = jnp.array([0.0, 0.0, 1.0], dtype=dtype)
-        first = initial_velocity / jnp.asarray(degree, dtype=dtype)
-        second = 2.0 * first
+        free_count = self.num_control_points - (6 if self.invertible else 5)
 
-        middle_count = max(self.num_control_points - 6, 0)
-        penultimate = endpoint - first
-        interior_times = jnp.linspace(
-            0.0,
-            1.0,
-            middle_count + 2,
+        if key is None:
+            key = jax.random.key(0)
+        free_key, initial_velocity_key, final_velocity_key = jax.random.split(key, 3)
+
+        init_scale = jnp.asarray(init_scale, dtype=dtype)
+        noise_scale = init_scale * jnp.maximum(
+            jnp.linalg.norm(endpoint),
+            jnp.asarray(1.0, dtype=dtype),
+        )
+        free_control_points = noise_scale * jax.random.normal(
+            free_key,
+            (free_count, 3),
             dtype=dtype,
-        )[1:-1]
-        middle = second[None, :] + interior_times[:, None] * (penultimate - second)[None, :]
-        free_control_points = jnp.concatenate([middle, penultimate[None, :]], axis=0)
-
-        if key is not None:
-            noise_scale = jnp.asarray(init_scale, dtype=dtype) * jnp.maximum(
-                jnp.linalg.norm(endpoint),
-                jnp.asarray(1.0, dtype=dtype),
-            )
-            free_control_points = free_control_points + noise_scale * jax.random.normal(
-                key,
-                free_control_points.shape,
-                dtype=dtype,
-            )
+        )
 
         self.free_control_points = free_control_points
+        self.initial_velocity_log_scale = init_scale * jax.random.normal(
+            initial_velocity_key,
+            (),
+            dtype=dtype,
+        )
+        self.final_velocity_log_scale = (
+            init_scale * jax.random.normal(final_velocity_key, (), dtype=dtype)
+            if self.invertible
+            else None
+        )
         self._position_coefficients = _binomial_coefficients(degree, dtype)
         self._velocity_coefficients = _binomial_coefficients(degree - 1, dtype)
         self._acceleration_coefficients = _binomial_coefficients(degree - 2, dtype)
@@ -88,14 +96,25 @@ class BezierCurve(LearnableCurve):
     def _control_points(self) -> jnp.ndarray:
         degree = self.num_control_points - 1
         dtype = self.free_control_points.dtype
-        first = (jnp.array([0.0, 0.0, 1.0], dtype=dtype) / jnp.asarray(degree, dtype=dtype))[None, :]
-        second = 2.0 * first
-        middle = self.free_control_points[:-1]
-        penultimate = self.free_control_points[-1:]
+        z_hat = jnp.array([0.0, 0.0, 1.0], dtype=dtype)
+        degree = jnp.asarray(degree, dtype=dtype)
+
         origin = jnp.zeros((1, 3), dtype=self.free_control_points.dtype)
         endpoint = self.endpoint[None, :]
 
-        antepenultimate = 2.0 * penultimate - endpoint
+        initial_step = jnp.exp(self.initial_velocity_log_scale) * z_hat / degree
+        first = initial_step[None, :]
+        second = (2.0 * initial_step)[None, :]
+
+        if self.invertible:
+            final_step = jnp.exp(self.final_velocity_log_scale) * z_hat / degree
+            middle = self.free_control_points
+            penultimate = endpoint + final_step[None, :]
+            antepenultimate = endpoint + (2.0 * final_step)[None, :]
+        else:
+            middle = self.free_control_points[:-1]
+            penultimate = self.free_control_points[-1:]
+            antepenultimate = 2.0 * penultimate - endpoint
 
         return jnp.concatenate(
             [origin, first, second, middle, antepenultimate, penultimate, endpoint],
