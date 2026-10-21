@@ -45,7 +45,6 @@ class BezierCurve(LearnableCurve):
         if n_ctrl_pts < 6: raise ValueError("n_ctrl_pts must be at least 6 to satisfy the endpoint curvature constraints.")
 
         endpoint = jnp.asarray(endpoint)
-        if not jnp.issubdtype(endpoint.dtype, jnp.inexact): endpoint = endpoint.astype(jnp.float32)
         if endpoint.shape != (3,): raise ValueError("endpoint must have shape (3,).")
 
         self.num_control_points = int(n_ctrl_pts)

@@ -8,7 +8,7 @@ from warnings import warn
 from abc import abstractmethod
 from typing import Callable, Self
 
-import magnus
+import magnus.jax as magnus
 
 """
 JAX-based workflow is slightly different.
@@ -114,7 +114,7 @@ class LearnableCurve(eq.Module):
         return jax.scipy.integrate.trapezoid(y=speed, x=t)
 
     @eq.filter_jit
-    def magnus(self, n: int, samples = 4096):
+    def magnus(self, n: int, samples = 4097):
         """
         Requires pulling in magnus-dp package: `https://github.com/s-cavalier/magnus-dp`
         Also drops the first term.
@@ -177,7 +177,7 @@ class LearnableCurve(eq.Module):
         fig.tight_layout()
         plt.show()
 
-    def plot_torsion(self, samples = 4096):
+    def plot_torsion(self, samples = 1024):
         t_samples = jnp.linspace(self.t0, self.tf, samples)
         tau_values = jax.vmap(self.torsion)(t_samples)
         phi_values = jax.vmap(self.phi)(t_samples)
@@ -278,7 +278,7 @@ class LearnableCurve(eq.Module):
         optimizer: optax.GradientTransformation = None,
         filter_spec = None,
         callback=None,
-    ):
+    ) -> Self:
         if optimizer is None: optimizer = optax.adam(lr)
 
         assert steps % chunk_size == 0, "steps must be divisible by chunk_size"
@@ -341,7 +341,7 @@ class LearnableCurve(eq.Module):
         linesearch = None,
         filter_spec = None,
         callback=None,
-    ):
+    ) -> Self:
         assert steps % chunk_size == 0, "steps must be divisible by chunk_size"
 
         if filter_spec is None: filter_spec = self.trainable_filter_spec()
